@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiroFish Minecraft World</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111827; color: #f9fafb; margin: 0; padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  input, button, select { padding: 8px; border-radius: 6px; border: 1px solid #374151; background: #1f2937; color: #f9fafb; }
+  button { background: #16a34a; border: none; cursor: pointer; }
+  button.secondary { background: #374151; }
+  canvas { background: #0b1220; border: 1px solid #374151; image-rendering: pixelated; max-width: 100%; }
+  .cols { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  table { border-collapse: collapse; font-size: 13px; }
+  th, td { border: 1px solid #374151; padding: 4px 8px; text-align: left; }
+  #log { font-size: 13px; white-space: pre-wrap; max-height: 300px; overflow: auto; background: #1f2937; padding: 8px; border-radius: 6px; }
+  .legend span { display: inline-block; width: 12px; height: 12px; margin-right: 4px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<h1>⛏️ MiroFish Minecraft World</h1>
+<p style="color:#9ca3af">A Minecraft-style world inside MiroFish: terrain, biomes, a village, and villagers who mine, farm, build, explore and trade — one tick = one in-game hour. This runs on its own tick engine, not on OASIS.</p>
+<div class="row">
+  <input id="name" value="Emberhill" size="14" placeholder="World name">
+  <input id="seed" value="mirofish" size="12" placeholder="Seed">
+  <button onclick="createWorld()">Create world</button>
+  <button class="secondary" onclick="createFromGraph()">Create from Future World graph</button>
+  <input id="worldId" size="20" placeholder="world id (mc_...)">
+  <button onclick="loadWorld()">Load</button>
+  <button onclick="tick(1)">▶ Tick 1h</button>
+  <button onclick="tick(24)">▶ Tick 1 day</button>
+  <button onclick="advanceYear(1)">▶ Advance 1 year</button>
+  <button class="secondary" onclick="advanceYear(10)">▶ Advance 10 years</button>
+</div>
+<div class="row" id="status">No world loaded yet.</div>
+<div class="cols">
+  <div>
+    <canvas id="map" width="640" height="640"></canvas>
+    <div class="legend" style="margin-top:8px">
+      <span style="background:#3b82f6"></span>water
+      <span style="background:#e7d27a"></span>sand
+      <span style="background:#4ade80"></span>grass
+      <span style="background:#9ca3af"></span>stone
+      <span style="background:#f8fafc"></span>snow
+      <span style="background:#166534"></span>tree
+      <span style="background:#b45309"></span>house
+      <span style="background:#facc15"></span>agent
+    </div>
+  </div>
+  <div>
+    <h3>Mega Mine (Blockforge)</h3>
+    <div id="mine">No mega mine built in this world yet.</div>
+    <h3>Villagers</h3>
+    <table id="agents"><tr><th>Name</th><th>Role</th><th>HP</th><th>Hunger</th><th>Inventory</th><th>Doing</th></tr></table>
+    <h3>Log</h3>
+    <div id="log"></div>
+  </div>
+</div>
+<script>
+const COLORS = {water:'#3b82f6', sand:'#e7d27a', grass:'#4ade80', stone:'#9ca3af', snow:'#f8fafc'};
+let worldId = null;
+async function api(path, body) {
+  const r = await fetch(path, {method: body ? 'POST' : 'GET', headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined});
+  return r.json();
+}
+async function createWorld() {
+  const d = await api('/api/minecraft/create', {name: document.getElementById('name').value, seed: document.getElementById('seed').value});
+  if (!d.success) { alert(d.error); return; }
+  worldId = d.world_id; document.getElementById('worldId').value = worldId; renderSummary(d); await loadMap();
+}
+async function createFromGraph() {
+  const d = await api('/api/minecraft/create', {name: document.getElementById('name').value, seed: document.getElementById('seed').value, graph_id: 'mirofish_9222d30e60f243b3'});
+  if (!d.success) { alert(d.error); return; }
+  worldId = d.world_id; document.getElementById('worldId').value = worldId; renderSummary(d); await loadMap();
+}
+async function loadWorld() {
+  worldId = document.getElementById('worldId').value.trim();
+  const d = await api('/api/minecraft/' + worldId);
+  if (!d.success) { alert(d.error); return; }
+  renderSummary(d); await loadMap();
+}
+async function tick(n) {
+  if (!worldId) { alert('Create or load a world first.'); return; }
+  const d = await api('/api/minecraft/' + worldId + '/tick', {ticks: n});
+  renderSummary(d); await loadMap();
+}
+async function advanceYear(n) {
+  if (!worldId) { alert('Create or load a world first.'); return; }
+  const d = await api('/api/minecraft/' + worldId + '/year', {years: n});
+  renderSummary(d); await loadMap();
+}
+function renderSummary(d) {
+  document.getElementById('status').textContent =
+    `${d.name} · Year ${d.year} · Day ${d.day}, ${String(d.hour).padStart(2,'0')}:00 (${d.time_of_day}) · Tick ${d.tick} · Live scale: 1 second = 1 year · ` +
+    `Houses ${d.structures.houses} · Farms ${d.structures.farms} · Workshops ${d.structures.workshops} · ` +
+    `Mined ${d.stats.mined} · Wood ${d.stats.wood_chopped} · Wheat ${d.stats.wheat_grown} · Built ${d.stats.built} · Crafted ${d.stats.crafted} · Trades ${d.stats.trades} · Explored ${d.stats.explored} cells`;
+  const mineEl = document.getElementById('mine');
+  if (d.mega_mine) {
+    const m = d.mega_mine, inf = m.infrastructure || {}, ops = m.operations || {};
+    const wallet = ops.wallet || {}, life = ops.lifetime || {};
+    mineEl.textContent =
+      `${m.name}: ${m.machines.toLocaleString()} machines, ${m.fleet_hashrate_eh_s} EH/s, ` +
+      `${m.fleet_blocks_found.toLocaleString()} blocks, ${m.fleet_btc_earned.toLocaleString()} BTC (simulated), ` +
+      `difficulty ${m.difficulty_t}T, power ${m.power_gw} GW` +
+      (inf.power ? ` · Tesla ${inf.power.supply_gw} GW, ${inf.power.megapacks.toLocaleString()} Megapacks` : '') +
+      (inf.cooling ? ` · Cooling ${inf.cooling.flow_m3_s} m³/s` : '') +
+      (inf.internet ? ` · Satellites ${inf.internet.satellites}, dishes ${inf.internet.dishes}` : '') +
+      (ops.staff ? ` · Staff ${ops.staff.total}, managers ${ops.staff.managers.join(', ')}` : '') +
+      (wallet.balance_btc !== undefined ? ` · Wallet ${wallet.balance_btc} BTC spendable, ${wallet.maturing_btc} BTC maturing, lifetime profit ${life.profit_btc} BTC` : '');
+  } else {
+    mineEl.textContent = 'No mega mine built in this world yet.';
+  }
+  const t = document.getElementById('agents');
+  t.innerHTML = '<tr><th>Name</th><th>Role</th><th>HP</th><th>Hunger</th><th>Inventory</th><th>Doing</th></tr>';
+  for (const a of d.agents) {
+    const inv = Object.entries(a.inventory).filter(([,v]) => v > 0).map(([k,v]) => `${k} ${v}`).join(', ') || '—';
+    t.innerHTML += `<tr><td>${a.name}${a.alive ? '' : ' 💀'}</td><td>${a.role}</td><td>${a.health}</td><td>${a.hunger}</td><td>${inv}</td><td>${a.last_action}</td></tr>`;
+  }
+  document.getElementById('log').textContent = (d.log || []).slice().reverse().join('\n');
+}
+async function loadMap() {
+  const d = await api('/api/minecraft/' + worldId + '/map');
+  if (!d.success) return;
+  const cv = document.getElementById('map'), ctx = cv.getContext('2d');
+  const size = d.size, px = 640 / size;
+  for (const row of d.cells) for (const c of row) {
+    ctx.fillStyle = c.structure === 'house' ? '#b45309' : c.structure === 'village_square' ? '#f59e0b' : COLORS[c.block] || '#333';
+    ctx.fillRect(c.x * px, c.y * px, px + 0.5, px + 0.5);
+    if (c.tree) { ctx.fillStyle = '#166534'; ctx.fillRect(c.x * px + px * 0.25, c.y * px + px * 0.25, px * 0.5, px * 0.5); }
+    if (c.ore && !c.ore_mined) { ctx.fillStyle = '#111'; ctx.fillRect(c.x * px + px * 0.35, c.y * px + px * 0.35, px * 0.3, px * 0.3); }
+  }
+  for (const a of d.agents) {
+    if (!a.alive) continue;
+    ctx.fillStyle = '#facc15'; ctx.beginPath();
+    ctx.arc(a.x * px + px / 2, a.y * px + px / 2, Math.max(2, px * 0.4), 0, 7); ctx.fill();
+  }
+}
+</script>
+</body>
+</html>
