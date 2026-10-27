@@ -141,3 +141,64 @@ def mega_miner_infrastructure(world_id):
     except ValueError as exc:
         return jsonify({"success": False, "error": str(exc)}), 404
     return jsonify({"success": True, "infrastructure": infra})
+
+
+@minecraft_bp.route('/<world_id>/world-builders', methods=['POST', 'GET'])
+def world_builders(world_id):
+    """POST appoint a World Builder (picked, goal = mine more, faster,
+    easier, more efficiently); GET lists builders + bonuses.
+    POST body: {name, origin, focus, agent_name} — agent_name
+    promotes a living villager; otherwise name must be supplied
+    (no real person's name is invented here)."""
+    world = MinecraftWorld.load(world_id)
+    if world is None:
+        return jsonify({"success": False, "error": "World not found"}), 404
+    if request.method == 'GET':
+        return jsonify({"success": True,
+                        "world_builders": world.data.get("world_builders", []),
+                        "bonuses": world.world_builder_bonuses()})
+    data = request.get_json(silent=True) or {}
+    try:
+        builder = world.appoint_world_builder(
+            name=data.get("name"), origin=data.get("origin", "picked"),
+            focus=data.get("focus", "hashrate"),
+            agent_name=data.get("agent_name"))
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    return jsonify({"success": True, "world_builder": builder,
+                    "bonuses": world.world_builder_bonuses()})
+
+
+@minecraft_bp.route('/<world_id>/time-dilation', methods=['POST', 'GET'])
+def time_dilation(world_id):
+    """POST set time dilation (years per real second, 0.1–100, set
+    by a World Builder); GET returns the current dilation."""
+    world = MinecraftWorld.load(world_id)
+    if world is None:
+        return jsonify({"success": False, "error": "World not found"}), 404
+    if request.method == 'GET':
+        return jsonify({"success": True,
+                        "time_dilation": world.data.get("time_dilation")})
+    data = request.get_json(silent=True) or {}
+    try:
+        dilation = world.set_time_dilation(
+            data.get("years_per_second", 1),
+            set_by=data.get("set_by", "World Builder"))
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    return jsonify({"success": True, "time_dilation": dilation})
+
+
+@minecraft_bp.route('/<world_id>/world-builders/replace', methods=['POST'])
+def replace_world_builders(world_id):
+    """Replace the whole roster with the supplied builders.
+    Body: {builders: [{name, origin, focus, simulated_representation}]}.
+    Simulated renowned figures must carry simulated_representation=true
+    (or origin picked_simulated); the record labels them as such."""
+    world = MinecraftWorld.load(world_id)
+    if world is None:
+        return jsonify({"success": False, "error": "World not found"}), 404
+    data = request.get_json(silent=True) or {}
+    builders = world.replace_world_builders(data.get("builders", []))
+    return jsonify({"success": True, "world_builders": builders,
+                    "bonuses": world.world_builder_bonuses()})

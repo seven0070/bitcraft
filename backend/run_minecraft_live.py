@@ -34,15 +34,32 @@ def main() -> int:
     stop_file = f"/tmp/minecraft-live-{world_id}.stop"
     if os.path.exists(stop_file):
         os.remove(stop_file)
-    print(f"Live mode: world {world_id}, 1 second = 1 year. "
+    print(f"Live mode: world {world_id}. "
           f"Stop file: {stop_file}")
     elapsed = 0
+    fractional = 0.0
     while True:
         world = MinecraftWorld.load(world_id)
         if world is None:
             print(f"World not found: {world_id}")
             return 1
-        summary = world.advance_year(1)
+        # Time dilation (set by World Builders): D years per real
+        # second. Fractional D accumulates until a whole year is due.
+        dilation = (world.data.get("time_dilation") or {}).get(
+            "years_per_second", 1.0)
+        fractional += float(dilation)
+        years = int(fractional)
+        fractional -= years
+        if years < 1:
+            time.sleep(1)
+            elapsed += 1
+            if limit and elapsed >= limit:
+                break
+            if os.path.exists(stop_file):
+                print("Stop file seen, exiting live mode.")
+                break
+            continue
+        summary = world.advance_year(years)
         alive = sum(1 for a in summary["agents"] if a["alive"])
         mine = summary.get("mega_mine")
         mine_txt = (f", mega mine {mine['machines']:,} machines, "

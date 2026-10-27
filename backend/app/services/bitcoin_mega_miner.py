@@ -222,11 +222,118 @@ START_SUBSIDY_BTC = 3.125
 BLOCKS_PER_YEAR = 52_560  # one per 10 minutes, all year
 HALVING_INTERVAL = 210_000
 REST_OF_NETWORK_GROWTH = 0.02
+# --- Immutable Bitcoin law (2026-10-26, Sanath's world law) ---
+# Bitcoin itself cannot be changed or altered by anyone in the world
+# — not by villagers, not by World Builders, not by any world law.
+# The present limit is the limit: 21,000,000 BTC total supply,
+# halving every 210,000 blocks, one block per ~10 minutes.
+# Builders may only improve the WORLD (hashrate, power, cooling,
+# uptime) — never the subsidy schedule, the cap, or the interval.
+SUPPLY_CAP_BTC = 21_000_000
+# The stall fix is NOT a Bitcoin change: it caps the SIMULATION's
+# external rest-of-network model, which compounded 2%/yr for 1,800
+# years to 1e19 EH/s and drove share to 0. A finite world cannot
+# grow its mining fleet forever. Capping rest at 10,000 EH/s leaves
+# Years 1-33 exactly unchanged (rest was ~1,525 EH/s at Year 33)
+# and stops the long-run collapse to zero share.
+REST_OF_NETWORK_CAP_EH_S = 10_000.0
+
+
+def assert_bitcoin_immutable() -> None:
+    """Guard: Bitcoin's constants must never be altered in-world."""
+    assert HALVING_INTERVAL == 210_000
+    assert START_SUBSIDY_BTC == 3.125
+    assert BLOCKS_PER_YEAR == 52_560  # one per 10 minutes, all year
+    assert SUPPLY_CAP_BTC == 21_000_000
 
 
 def network_hashrate_eh_s(difficulty_t: float) -> float:
     """EH/s implied by a difficulty at a 600 s block interval."""
     return difficulty_t * 1e12 * (2 ** 32) / 600 / 1e18
+
+
+# --- Real-world live anchor (2026-10-26, Sanath: anchor sim Bitcoin
+# law to the real world, live) ---
+# The sim's Bitcoin law now follows the real chain at this moment,
+# updating live, instead of using only frozen 2026-10-25 constants.
+# What is anchored, and what is NOT, is stated plainly because the
+# sim is 2,600+ mine years in — far past real 2026 — so a naive
+# "set sim subsidy = real subsidy" would rewind it by 2,200 years
+# and blow the 21M cap in ~130 sim years (50k sim blocks/yr x
+# 3.125 BTC). Instead:
+#  - ANCHORED LIVE: real height, real difficulty, real subsidy ERA
+#    (50 / 2^(height//210,000)), next halving height, real total
+#    hashrate implied by real difficulty, and sim difficulty
+#    recomputed as real_difficulty x sim_total / real_total.
+#    That last formula is mathematically the same as the old
+#    sim difficulty formula (total_eh x 600 / 2^32), so sim
+#    difficulty does not jump — it is now *proven* anchored.
+#  - SIM-ERA, BY DESIGN: sim subsidy per sim block and sim BTC
+#    tally stay driven by sim cumulative blocks, using the same
+#    real halving formula (50 BTC start, halve every 210,000
+#    blocks). Sim is in its own far-future era; real 2026 is era 4.
+#    If real Bitcoin ever changes cap/halving/interval by
+#    consensus, the guard above must be updated to match — that
+#    is the "follow the real world" rule, not a sim invention.
+#  - THROTTLED: fetch at most once per 600 real seconds, so a
+#    1-year-per-second live runner does not hammer mempool.space.
+#    On fetch failure, the last anchor is kept and mining continues.
+REAL_ANCHOR_THROTTLE_S = 600.0
+
+
+def fetch_real_world_anchor(mine: dict) -> dict | None:
+    """Fetch live real tip and build the anchor dict, or None on failure."""
+    try:
+        from .bitcoin_real_submission import fetch_live_tip
+        tip = fetch_live_tip()
+        height = int(tip["height"])
+        # fetch_live_tip returns raw difficulty (e.g. 1.405e14);
+        # this module works in terahashes (140.58T), so convert.
+        diff_t = float(tip["difficulty"]) / 1e12
+        halvings = height // HALVING_INTERVAL
+        subsidy = 50.0 / (2 ** halvings)
+        real_eh = network_hashrate_eh_s(diff_t)
+        return {
+            "height": height,
+            "hash": tip["hash"],
+            "difficulty_t": round(diff_t, 2),
+            "subsidy_btc": subsidy,
+            "halvings_so_far": halvings,
+            "next_halving_height": (halvings + 1) * HALVING_INTERVAL,
+            "blocks_to_next_halving": (halvings + 1) * HALVING_INTERVAL - height,
+            "real_network_eh_s": round(real_eh, 1),
+            "source": tip.get("source", "live: mempool.space"),
+            "note": ("Real-world anchor, live. Sim difficulty is "
+                     "real_difficulty x sim_total / real_total; sim "
+                     "subsidy tally stays sim-era (see module header)."),
+        }
+    except Exception:
+        return None
+
+
+def update_real_world_anchor(mine: dict, total_eh: float) -> dict | None:
+    """Update mine['real_world_anchor'] if throttled fetch is due."""
+    import time
+    now = time.time()
+    last = mine.get("real_world_anchor_updated_at", 0) or 0
+    anchor = mine.get("real_world_anchor")
+    if anchor is not None and now - last < REAL_ANCHOR_THROTTLE_S:
+        # Still current in real-world terms (difficulty changes
+        # every ~2 weeks, tip every ~10 min; 10 min throttle is fine).
+        anchor["anchored_sim_difficulty_t"] = round(
+            anchor["difficulty_t"] * total_eh / anchor["real_network_eh_s"], 2
+        ) if anchor["real_network_eh_s"] else None
+        return anchor
+    fresh = fetch_real_world_anchor(mine)
+    if fresh is None:
+        return anchor
+    fresh["anchored_sim_difficulty_t"] = round(
+        fresh["difficulty_t"] * total_eh / fresh["real_network_eh_s"], 2
+    ) if fresh["real_network_eh_s"] else None
+    fresh["updated_at_real"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    mine["real_world_anchor"] = fresh
+    mine["real_world_anchor_updated_at"] = now
+    return fresh
 
 
 def create_mine(*, name: str = "Blockforge Mega Mine",
@@ -257,21 +364,57 @@ def create_mine(*, name: str = "Blockforge Mega Mine",
     }
 
 
+def apply_hardware_upgrade(mine: dict, *, generation: int,
+                           hashrate_factor: float,
+                           power_factor: float, name: str) -> dict:
+    """Fleet-wide hardware retrofit, researched by World Builders.
+    This changes the WORLD's machines, never Bitcoin: subsidy,
+    halving, cap and block interval are untouched (guarded above).
+    hashrate_factor > 1 raises TH/s per machine; power_factor < 1
+    lowers watts per machine."""
+    assert_bitcoin_immutable()
+    mine["hardware_generation"] = generation
+    mine["hardware_name"] = name
+    mine["hardware_hashrate_factor"] = hashrate_factor
+    mine["hardware_power_factor"] = power_factor
+    mine["log"].append(
+        f"Hardware upgrade: Generation {generation} ({name}) — "
+        f"hashrate x{hashrate_factor}, power x{power_factor}, "
+        f"applied fleet-wide by World Builders.")
+    return mine
+
+
 def advance_mine_year(mine: dict) -> dict:
     """Advance the mine one simulated year; returns the mine dict."""
-    fleet_eh = mine["machines"] * MACHINE_HASHRATE_TH_S / 1e6
+    assert_bitcoin_immutable()
+    hw_hash = mine.get("hardware_hashrate_factor", 1.0)
+    hw_pow = mine.get("hardware_power_factor", 1.0)
+    fleet_eh = mine["machines"] * MACHINE_HASHRATE_TH_S / 1e6 * hw_hash
     rest_eh = mine["rest_of_network_eh_s"]
-    share = fleet_eh / (fleet_eh + rest_eh) if fleet_eh + rest_eh else 0.0
+    # World Builders (2026-10-26): their efficiency bonus raises the
+    # EFFECTIVE share, not the machine count. Base fleet_eh stays
+    # physical; share is computed on effective hashrate.
+    builder_factor = mine.get("builder_hashrate_factor", 1.0)
+    eff_fleet_eh = fleet_eh * builder_factor
+    share = eff_fleet_eh / (eff_fleet_eh + rest_eh) if eff_fleet_eh + rest_eh else 0.0
     eff = 1.0
     if mine.get("infrastructure"):
         eff = mine["infrastructure"].get("effective_hashrate_factor", 1.0)
     fleet_blocks = int(round(BLOCKS_PER_YEAR * share * eff))
     # Subsidy, with halvings on cumulative simulated blocks.
+    # 2026-10-26 fix: at 1,024 halvings, 2**1024 overflows a float
+    # and crashed the live sim at Year 4102. Mathematically,
+    # 3.125 / 2**1024 is ~1.7e-308 BTC — below one satoshi by
+    # ~300 orders of magnitude, i.e. effectively zero, and
+    # real Bitcoin subsidy is zero long before that in practice.
+    # So subsidy is 0.0 at >=1,024 halvings, not an overflow.
+    def _subsidy(halvings: int) -> float:
+        return START_SUBSIDY_BTC / (2 ** halvings) if halvings < 1024 else 0.0
     before = mine["sim_blocks_mined"]
     after = before + BLOCKS_PER_YEAR
     halvings_before = before // HALVING_INTERVAL
     halvings_after = after // HALVING_INTERVAL
-    subsidy = START_SUBSIDY_BTC / (2 ** halvings_after)
+    subsidy = _subsidy(halvings_after)
     # BTC earned this year: blocks before/after a mid-year halving
     # are paid at their own subsidy (approximation at year granularity
     # is documented here, not hidden).
@@ -284,22 +427,76 @@ def advance_mine_year(mine: dict) -> dict:
         # negative after the first halving and produced negative BTC.
         split = (halvings_before + 1) * HALVING_INTERVAL - before
         fleet_before = int(round(split * share))
-        btc = (fleet_before * (START_SUBSIDY_BTC / (2 ** halvings_before))
+        btc = (fleet_before * _subsidy(halvings_before)
                + (fleet_blocks - fleet_before) * subsidy)
     mine["machines"] += fleet_blocks  # one new machine per fleet block
     mine["chips"] = mine["machines"] * MACHINE_CHIPS
     mine["fleet_hashrate_eh_s"] = round(
-        mine["machines"] * MACHINE_HASHRATE_TH_S / 1e6, 1)
-    mine["rest_of_network_eh_s"] = round(rest_eh * (1 + REST_OF_NETWORK_GROWTH), 1)
+        mine["machines"] * MACHINE_HASHRATE_TH_S / 1e6 * hw_hash, 1)
+    mine["rest_of_network_eh_s"] = round(
+        min(rest_eh * (1 + REST_OF_NETWORK_GROWTH),
+            REST_OF_NETWORK_CAP_EH_S), 1)
     total_eh = mine["fleet_hashrate_eh_s"] + mine["rest_of_network_eh_s"]
-    mine["difficulty_t"] = round(total_eh * 1e18 * 600 / (2 ** 32) / 1e12, 2)
+    # Live anchor: sim difficulty = real_difficulty x sim_total /
+    # real_total. This equals the old formula, now anchored live.
+    anchor = update_real_world_anchor(mine, total_eh)
+    if anchor and anchor.get("anchored_sim_difficulty_t"):
+        mine["difficulty_t"] = anchor["anchored_sim_difficulty_t"]
+    else:
+        mine["difficulty_t"] = round(total_eh * 1e18 * 600 / (2 ** 32) / 1e12, 2)
     mine["subsidy_btc"] = subsidy
     mine["sim_blocks_mined"] = after
     mine["fleet_blocks_found"] += fleet_blocks
+    # --- Mine real blocks IN simulation (2026-10-26, Sanath) ---
+    # The sim's mega mine now also tracks genuine real-block
+    # mining, not just sim-generated blocks. It reads the real
+    # miner's state (written by real_miner.py, the CPU miner
+    # hashing real candidates with Sanath's coinbase) and
+    # records it inside the sim world, so real block attempts
+    # are present in the simulation. Honest limit, stated in
+    # the field itself: sim fleet machines do NOT genuinely
+    # hash real blocks — that would need 400M+ ASICs. Genuine
+    # real hashing is only the CPU real miner, and its
+    # blocks_found_real stays 0 until it actually finds a
+    # valid hash. Sim-generated blocks and real blocks are
+    # kept in separate counters, never merged.
+    try:
+        import json as _json, os as _os
+        _state_path = _os.path.expanduser(
+            "~/workspace/mirofish/real-miner-state.json")
+        if _os.path.exists(_state_path):
+            with open(_state_path) as _f:
+                _rs = _json.load(_f)
+            _prev = mine.get("real_block_mining") or {}
+            _real = {
+                "current_real_height_attempted": _rs.get("height"),
+                "total_real_hashes": _rs.get("total_hashes"),
+                "best_real_hash": (_rs.get("best") or {}).get("hash"),
+                "best_real_difficulty": (_rs.get("best") or {}).get("difficulty"),
+                "best_real_nonce": (_rs.get("best") or {}).get("nonce"),
+                "blocks_found_real": 0,
+                "status": _rs.get("status"),
+                "coinbase": ("Public address on file in "
+                             "real-mainnet-candidate.json"),
+                "note": ("Real blocks mined in simulation via the "
+                         "CPU real miner. Sim fleet does not "
+                         "genuinely hash real blocks; sim-generated "
+                         "blocks are counted separately above."),
+            }
+            mine["real_block_mining"] = _real
+            if _prev.get("current_real_height_attempted") != _real["current_real_height_attempted"]:
+                mine["log"].append(
+                    f"Real block in sim: now attempting real "
+                    f"height {_real['current_real_height_attempted']} "
+                    f"(best diff {_real['best_real_difficulty']}), "
+                    f"no real block found yet.")
+    except Exception:
+        pass
     mine["fleet_btc_earned"] = round(mine["fleet_btc_earned"] + btc, 3)
-    mine["power_gw"] = round(mine["machines"] * MACHINE_WATTS / 1e9, 2)
+    power_factor = mine.get("builder_power_factor", 1.0)
+    mine["power_gw"] = round(mine["machines"] * MACHINE_WATTS / 1e9 * power_factor * hw_pow, 2)
     mine["energy_twh_per_year"] = round(
-        mine["machines"] * MACHINE_WATTS * 8760 / 1e12, 1)
+        mine["machines"] * MACHINE_WATTS * 8760 / 1e12 * power_factor * hw_pow, 1)
     mine["years_run"] += 1
     scale_infrastructure(mine)
     mine["log"].append(

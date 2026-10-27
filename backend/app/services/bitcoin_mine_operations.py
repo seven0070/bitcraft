@@ -69,6 +69,13 @@ POWER_PRICE_USD_PER_MWH = 25
 FEES_BTC_PER_BLOCK = 0.50
 START_BTC_PRICE_USD = 150_000
 BTC_PRICE_GROWTH = 0.03
+# Ops price cap (2026-10-27 fix): 3%/yr compounding over ~23,600 sim
+# years reaches float overflow (~1e308) and crashes advance_year with
+# OverflowError. Price is a sim ops assumption, NOT a Bitcoin protocol
+# constant, so capping it is a model fix, not a Bitcoin law change.
+# At $1e12, USD costs in BTC are still negligible vs revenue, so
+# ops economics are essentially unchanged; growth simply stops there.
+BTC_PRICE_CAP_USD = 10**12
 DOWNTIME_DAYS_PER_FAILURE = 1
 INTRUSION_ATTEMPTS_PER_YEAR = 5
 
@@ -111,6 +118,10 @@ def advance_operations_year(ops: dict, *, machines: int, power_gw: float,
     """Advance operations one year. Returns the year's summary."""
     params = ops["parameters"]
     price = params["btc_price_usd"]
+    # Cap pre-existing overgrown prices (worlds saved before the cap).
+    if price > BTC_PRICE_CAP_USD:
+        price = BTC_PRICE_CAP_USD
+        params["btc_price_usd"] = price
     # Staff scales with the fleet.
     staff_total = max(1, machines // WORKER_PER_MACHINES)
     ops["staff"] = {
@@ -184,6 +195,7 @@ def advance_operations_year(ops: dict, *, machines: int, power_gw: float,
     }
     ops["history"].append(summary)
     ops["history"] = ops["history"][-50:]
-    # Price grows for next year.
-    params["btc_price_usd"] = round(price * (1 + BTC_PRICE_GROWTH))
+    # Price grows for next year, capped (see BTC_PRICE_CAP_USD above).
+    params["btc_price_usd"] = min(
+        round(price * (1 + BTC_PRICE_GROWTH)), BTC_PRICE_CAP_USD)
     return summary

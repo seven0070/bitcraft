@@ -1,0 +1,55 @@
+{
+ "division": "Kimi mines (portable sim batches), Atlas controls and organises (live world, verification, ledger, real miner). Agreed 2026-10-26.",
+ "runs": [
+  {
+   "chat_url": "https://www.kimi.ai/chat/1a178643-c7a2-86a7-8000-09d391558e72",
+   "code_file": "emberhill_portable_for_kimi.py",
+   "end_year": 100,
+   "engine": "Kimi K3.1 Pro, kimi.ai, Sanath S Patil, Plus",
+   "kimi_final": {
+    "alive": 209,
+    "difficulty_t": 1975.5,
+    "fleet_blocks_found": 3175718,
+    "houses": 312,
+    "machines": 4148519,
+    "power_gw": 36.14,
+    "share": 0.4946,
+    "sim_btc": 831021.54,
+    "year": 100
+   },
+   "local_final": "identical year summaries, Year 100 same as above",
+   "match": true,
+   "note": "First Kimi run. One-shot genesis run, not a continuation. No real mining, no wallet sent.",
+   "run_id": "kimi-001",
+   "start_year": 0,
+   "verified_by": "Atlas, local run of same code"
+  },
+  {
+   "run_id": "kimi-002",
+   "engine": "Kimi K3.1 Pro, kimi.ai, Sanath S Patil, Plus",
+   "code_file": "emberhill_portable_for_kimi.py (with --resume)",
+   "start_year": 100,
+   "end_year": 200,
+   "start_state_file": "kimi-year100-state.json",
+   "chat_url": "https://www.kimi.ai/chat/1a1786ea-efc2-86c3-8000-09d317885bec",
+   "chat_title": "Year 100-200 Simulation",
+   "kimi_final": {
+    "year": 200,
+    "alive": 409,
+    "houses": 612,
+    "mined": 11406,
+    "machines": 6676071,
+    "fleet_blocks_found": 5703270,
+    "sim_btc": 831021.556,
+    "share": 0.53,
+    "difficulty_t": 2972.6,
+    "power_gw": 58.16
+   },
+   "local_final": "identical summaries Year 110-200, Year 200 same as above",
+   "match": true,
+   "verification_note": "Summary lines verified exactly vs local resume run. Kimi attached full Year 200 JSON (50,317 bytes, 409 agents) in chat, not printed inline and not downloaded by Atlas, so full-file verification is summary-level, not file-level.",
+   "verified_by": "Atlas, local resume run of same code + same Year 100 state",
+   "note": "Run 2 under Kimi-mines / Atlas-controls division. No wallet, no keys, no real mining sent."
+  }
+ ]
+}

@@ -52,6 +52,8 @@ from .bitcoin_mega_miner import (advance_mine_year, build_infrastructure,
                                  create_mine)
 from .bitcoin_mine_operations import (advance_operations_year,
                                       create_operations)
+from .world_builders import (clamp_dilation, compute_bonuses,
+                             create_builder, default_dilation)
 
 logger = get_logger("mirofish.minecraft_world")
 
@@ -187,6 +189,8 @@ class MinecraftWorld:
             "cells": cells, "agents": world_agents,
             "tick": 0, "day": 1, "hour": 6, "year": 1,
             "mega_mine": None,
+            "world_builders": [],
+            "time_dilation": default_dilation(),
             "time_scale": "1 real second = 1 in-game year in live mode",
             "structures": {"houses": 0, "farms": 0, "mineshafts": 0,
                            "workshops": 0},
@@ -246,6 +250,8 @@ class MinecraftWorld:
         # Worlds created before the year scale existed gain it here.
         data.setdefault("year", 1)
         data.setdefault("mega_mine", None)
+        data.setdefault("world_builders", [])
+        data.setdefault("time_dilation", default_dilation())
         data.setdefault("time_scale",
                         "1 real second = 1 in-game year in live mode")
         for i, agent in enumerate(data.get("agents", [])):
@@ -268,6 +274,10 @@ class MinecraftWorld:
             "tick": d["tick"], "day": d["day"], "hour": d["hour"],
             "year": d.get("year", 1),
             "mega_mine": d.get("mega_mine"),
+            "world_builders": d.get("world_builders", []),
+            "world_builder_bonuses": compute_bonuses(
+                d.get("world_builders", [])),
+            "time_dilation": d.get("time_dilation", default_dilation()),
             "time_scale": d.get("time_scale",
                                 "1 real second = 1 in-game year in live mode"),
             "time_of_day": "night" if d["hour"] < 6 or d["hour"] >= 22
@@ -386,6 +396,109 @@ class MinecraftWorld:
         self.save()
         return ops
 
+    # -- world builders ----------------------------------------------
+    def world_builder_bonuses(self) -> dict:
+        return compute_bonuses(self.data.get("world_builders", []))
+
+    def appoint_world_builder(self, *, name: str | None = None,
+                              origin: str = "picked",
+                              focus: str = "hashrate",
+                              agent_name: str | None = None) -> dict:
+        """Pick a builder and ask them to build. If agent_name is
+        given, the matching living villager is promoted (their role
+        stays, they gain world_builder=True); otherwise an external
+        picked builder is recorded by name — a name Sanath supplies,
+        never invented here."""
+        builder = create_builder(name, origin=origin, focus=focus)
+        if agent_name:
+            agent = next((a for a in self.data["agents"]
+                          if a["name"] == agent_name and a["alive"]), None)
+            if agent is None:
+                raise ValueError(f"No living villager named {agent_name}")
+            builder["name"] = agent["name"]
+            builder["origin"] = "villager_promoted"
+            builder["villager_role"] = agent["role"]
+            agent["world_builder"] = True
+        self.data.setdefault("world_builders", []).append(builder)
+        self._log(f"World Builder picked: {builder['name']} "
+                  f"(focus {builder['focus']}, origin {builder['origin']}) — "
+                  f"goal: mine more, faster, easier, more efficiently.")
+        self.save()
+        return builder
+
+    def replace_world_builders(self, builders: list[dict]) -> list[dict]:
+        """Replace the whole World Builder roster. Old villagers lose
+        their world_builder flag; new builders are recorded as given
+        (simulated representations carry that flag in their record)."""
+        for agent in self.data["agents"]:
+            agent.pop("world_builder", None)
+        new_list = []
+        for spec in builders or []:
+            new_list.append(create_builder(
+                spec.get("name"), origin=spec.get("origin", "picked"),
+                focus=spec.get("focus", "hashrate"),
+                picked_by=spec.get("picked_by", "Sanath"),
+                simulated=bool(spec.get("simulated_representation"))
+                or spec.get("origin") == "picked_simulated"))
+        self.data["world_builders"] = new_list
+        self._log(f"World Builders replaced: "
+                  f"{', '.join(b['name'] for b in new_list)}.")
+        self.save()
+        return new_list
+
+    def set_bitcoin_law(self) -> dict:
+        """World law: Bitcoin is immutable in this world. No being —
+        villager, World Builder, or world rule — can change or alter
+        it. The present limit is the limit."""
+        law = {
+            "bitcoin_immutable": True,
+            "aim": ("Make the world mine more, faster, easier, more "
+                    "effectively and more efficiently, without changing "
+                    "Bitcoin itself."),
+            "supply_cap_btc": 21_000_000,
+            "halving_interval_blocks": 210_000,
+            "target_block_interval_minutes": 10,
+            "builders_may_change": ["hashrate", "power", "cooling",
+                                    "uptime", "repair", "world efficiency"],
+            "builders_may_not_change": ["bitcoin supply cap", "subsidy",
+                                        "halving schedule",
+                                        "block interval", "Bitcoin protocol"],
+            "note": ("The present Bitcoin limit is the limit. No being "
+                     "in this world can change Bitcoin or alter it."),
+            # 2026-10-26, Sanath: anchor to the real world, live.
+            # Law parameters follow real Bitcoin at this moment
+            # (height, difficulty, subsidy era, next halving) and
+            # update as the real chain moves; sim subsidy tally
+            # stays sim-era because the sim is 2,600+ mine years
+            # in, not in real 2026. See bitcoin_mega_miner header.
+            "anchor": "real_world_live",
+            "anchor_note": ("Real height/difficulty/subsidy era from "
+                            "mempool.space, throttled to 10 min real "
+                            "time, stored in mega_mine.real_world_anchor. "
+                            "If real Bitcoin changes cap/halving/"
+                            "interval by consensus, this law follows it."),
+        }
+        self.data.setdefault("world_laws", {})["bitcoin"] = law
+        self._log("World law set: Bitcoin is immutable — no being in "
+                  "this world can change or alter it.")
+        self.save()
+        return law
+
+    def set_time_dilation(self, years_per_second: float,
+                          set_by: str = "World Builder") -> dict:
+        """Set the live-mode time dilation period. D years pass per
+        real second. Recorded with its setter; the old 1 sec = 1 year
+        scale is simply D = 1."""
+        d = clamp_dilation(years_per_second)
+        dilation = {"years_per_second": d, "set_by": set_by,
+                    "note": f"{d} in-game year(s) per real second in live mode"}
+        self.data["time_dilation"] = dilation
+        self.data["time_scale"] = dilation["note"]
+        self._log(f"Time dilation set to {d} year(s) per real second "
+                  f"by {set_by}.")
+        self.save()
+        return dilation
+
     # -- helpers ------------------------------------------------------
     def _cell(self, x: int, y: int) -> dict | None:
         size = self.data["size"]
@@ -454,6 +567,17 @@ class MinecraftWorld:
 
     def advance_year(self, n: int = 1) -> dict:
         d = self.data
+        # Giants' aging (2026-10-26, Sanath): villagers age like giants —
+        # 10x slower than humans. Age is in giant-years: +0.1 per sim
+        # year, death at 80 giant-years (= 800 sim years), 25% yearly
+        # risk from 70 giant-years (= 700 sim years). Old human-aged
+        # worlds convert once: age / 10, so a 75-year-old human
+        # becomes a 7.5-year-old giant, not a dying elder.
+        if d.get("aging") != "giant":
+            for a in d.get("agents", []):
+                a["age"] = round(a.get("age", 25) / 10.0, 1)
+                a.setdefault("generation", 1)
+            d["aging"] = "giant"
         for _ in range(max(1, min(100, int(n or 1)))):
             d["year"] = d.get("year", 1) + 1
             year = d["year"]
@@ -462,9 +586,14 @@ class MinecraftWorld:
             for agent in list(d["agents"]):
                 if not agent["alive"]:
                     continue
-                agent["age"] = agent.get("age", 25) + 1
+                # Giant age: +0.1 giant-year per sim year.
+                agent["age"] = round(agent.get("age", 2.5) + 0.1, 1)
                 agent["hunger"] = 100
                 agent["health"] = min(100, agent["health"] + 20)
+                # Better next generation: each generation is 5% more
+                # productive than the last, capped at double (Gen 21+).
+                gen = agent.setdefault("generation", 1)
+                mult = min(2.0, 1.0 + 0.05 * (gen - 1))
                 if agent["age"] >= 80 or (agent["age"] >= 70
                                           and rng.random() < 0.25):
                     agent["alive"] = False
@@ -474,25 +603,25 @@ class MinecraftWorld:
                     continue
                 role, inv = agent["role"], agent["inventory"]
                 if role == "Miner":
-                    inv["coal"] += 30; inv["iron"] += 20
-                    inv["gold"] += 5; inv["diamond"] += 2
-                    d["stats"]["mined"] += 57
+                    inv["coal"] += round(30 * mult); inv["iron"] += round(20 * mult)
+                    inv["gold"] += round(5 * mult); inv["diamond"] += round(2 * mult)
+                    d["stats"]["mined"] += round(57 * mult)
                     d["structures"]["mineshafts"] = max(
                         1, d["structures"]["mineshafts"])
                     agent["last_action"] = f"Year {year}: mined the year through."
                 elif role == "Lumberjack":
-                    inv["wood"] += 80
-                    d["stats"]["wood_chopped"] += 80
+                    inv["wood"] += round(80 * mult)
+                    d["stats"]["wood_chopped"] += round(80 * mult)
                     agent["last_action"] = f"Year {year}: felled timber all year."
                 elif role == "Farmer":
-                    inv["wheat"] += 200; inv["bread"] += 50
-                    d["stats"]["wheat_grown"] += 200
+                    inv["wheat"] += round(200 * mult); inv["bread"] += round(50 * mult)
+                    d["stats"]["wheat_grown"] += round(200 * mult)
                     d["structures"]["farms"] = max(1, d["structures"]["farms"])
                     agent["last_action"] = f"Year {year}: harvested and baked."
                 elif role == "Builder":
                     wood = self._consume_village("wood", 20)
                     stone = self._consume_village("stone", 20)
-                    built = 3 if wood >= 20 and stone >= 20 else 1
+                    built = round((3 if wood >= 20 and stone >= 20 else 1) * mult)
                     d["structures"]["houses"] += built
                     d["stats"]["built"] += built
                     agent["last_action"] = f"Year {year}: built {built} houses."
@@ -500,56 +629,72 @@ class MinecraftWorld:
                     new_cells = 0
                     for row in d["cells"]:
                         for cell in row:
-                            if not cell["explored"] and new_cells < 60:
+                            if not cell["explored"] and new_cells < round(60 * mult):
                                 cell["explored"] = True
                                 new_cells += 1
                     d["stats"]["explored"] += new_cells
                     agent["last_action"] = f"Year {year}: mapped {new_cells} new cells."
                 elif role == "Trader":
-                    inv["coins"] += 100
+                    inv["coins"] += round(100 * mult)
                     d["stats"]["trades"] += 10
                     agent["last_action"] = f"Year {year}: traded all year."
                 elif role == "Engineer":
                     if self._consume_village("iron", 5) >= 5:
-                        inv["tools"] += 5
-                        d["stats"]["crafted"] += 5
+                        inv["tools"] += round(5 * mult)
+                        d["stats"]["crafted"] += round(5 * mult)
                         d["structures"]["workshops"] = max(
                             1, d["structures"]["workshops"])
-                        agent["last_action"] = f"Year {year}: crafted 5 tools."
+                        agent["last_action"] = f"Year {year}: crafted {round(5 * mult)} tools."
                     else:
-                        inv["wood"] += 20
+                        inv["wood"] += round(20 * mult)
                         agent["last_action"] = f"Year {year}: gathered materials."
                 elif role == "Guard":
                     agent["last_action"] = f"Year {year}: kept the village safe."
                 else:
-                    inv["wood"] += 20
+                    inv["wood"] += round(20 * mult)
                     agent["last_action"] = f"Year {year}: helped the village."
             alive = [a for a in d["agents"] if a["alive"]]
-            if d["structures"]["houses"] > len(alive) and year % 2 == 0:
-                name = rng.choice(["Maya", "Arjun", "Noor", "Leo",
-                                   "Ira", "Kabir", "Zoe", "Ravi"])
-                d["agents"].append({
-                    "id": f"agent_{len(d['agents'])}", "name": name,
-                    "role": "Villager", "age": 18,
-                    "x": d["spawn"]["x"], "y": d["spawn"]["y"],
-                    "hunger": 100, "health": 100,
-                    "inventory": {"wood": 0, "stone": 0, "coal": 0,
-                                  "iron": 0, "gold": 0, "diamond": 0,
-                                  "wheat": 0, "bread": 2, "tools": 0,
-                                  "coins": 0},
-                    "alive": True,
-                    "last_action": f"Born/arrived in Year {year}.",
-                })
-                births.append(name)
+            # Reproduce even better: births every year (not every 2nd),
+            # 2 babies when houses run well ahead of population, and
+            # each birth cohort is the next generation — 5% better
+            # output than the last, capped at double.
+            if d["structures"]["houses"] > len(alive):
+                n_births = 2 if d["structures"]["houses"] - len(alive) >= 10 else 1
+                next_gen = max([a.get("generation", 1) for a in d["agents"]], default=1) + 1
+                for _ in range(n_births):
+                    name = rng.choice(["Maya", "Arjun", "Noor", "Leo",
+                                       "Ira", "Kabir", "Zoe", "Ravi"])
+                    d["agents"].append({
+                        "id": f"agent_{len(d['agents'])}", "name": name,
+                        "role": "Villager", "age": 1.8, "generation": next_gen,
+                        "x": d["spawn"]["x"], "y": d["spawn"]["y"],
+                        "hunger": 100, "health": 100,
+                        "inventory": {"wood": 0, "stone": 0, "coal": 0,
+                                      "iron": 0, "gold": 0, "diamond": 0,
+                                      "wheat": 0, "bread": 2, "tools": 0,
+                                      "coins": 0},
+                        "alive": True,
+                        "last_action": f"Born/arrived in Year {year} (Generation {next_gen}).",
+                    })
+                    births.append(f"{name} (Gen {next_gen})")
             self._log(f"Year {year} complete: {len(alive)} villagers alive"
                       + (f", {len(deaths)} died" if deaths else "")
                       + (f", {len(births)} arrived" if births else "")
                       + f", {d['structures']['houses']} houses.")
             if d.get("mega_mine"):
                 mine = d["mega_mine"]
+                bonuses = compute_bonuses(d.get("world_builders", []))
+                mine["builder_hashrate_factor"] = bonuses["hashrate_factor"]
+                mine["builder_power_factor"] = bonuses["power_factor"]
+                mine["builder_bonuses"] = bonuses
                 before_blocks = mine["fleet_blocks_found"]
                 before_btc = mine["fleet_btc_earned"]
                 advance_mine_year(mine)
+                if bonuses["builders"]:
+                    self._log(f"Year {year}: World Builders "
+                              f"({bonuses['builders']}) — effective hashrate "
+                              f"x{bonuses['hashrate_factor']}, power "
+                              f"x{bonuses['power_factor']}.")
                 self._log(f"Year {year}: mega mine now "
                           f"{mine['machines']:,} machines, "
                           f"found {mine['fleet_blocks_found']:,} "
